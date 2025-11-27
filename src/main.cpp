@@ -1,45 +1,22 @@
 #include <opencv2/opencv.hpp>
-#include <iostream>
 #include <algorithm>
 #include <mutex>
-#include <optional>
 #include <atomic>
 #include <semaphore>
 #include "headers/imageprocessor.h"
 #include "headers/timer.h"
-
-#define log(msg) std::cout << "[INF] " << msg << std::endl;
-#define warn(msg) std::cout << "[WARN] " << msg << std::endl;
-#define err(msg) std::cerr << "[ERR] " << msg << std::endl;
+#include "headers/loggers.h"
 
 using std::atomic;
 using std::counting_semaphore;
 using std::string;
-using std::optional;
 using namespace std::filesystem;
-
-struct ProgramOptions {
-    path srcPath;
-    path dstPath;
-    optional<unsigned int> threads;
-
-    bool empty() {
-        return srcPath.empty() || dstPath.empty();
-    }
-
-    bool threadsSpecified() {
-        return threads.has_value();
-    }
-
-    unsigned int threadCount() {
-        return threadsSpecified() ? threads.value() : thread::hardware_concurrency();
-    }
-};
 
 bool readOptions(int argc, char* argv[], ProgramOptions& options);
 bool isValidOptions(const ProgramOptions& options);
-vector<Image> collectImages(const ProgramOptions& options);
-unsigned int loadImages(vector<Image>& images, unsigned int maxThreads);
+void collectImages(vector<Image>& images, const ProgramOptions& options);
+void printUsage();
+void report(const ProcessingResult& res);
 
 //
 
@@ -57,7 +34,7 @@ int main(int argc, char* argv[]) {
     }
 
     maxThreads = options.threadCount();
-    ImageProcessor ip(maxThreads);
+    ImageProcessor ip(maxThreads, options);
 
     log("Selected input folder: " + options.srcPath.string());
     log("Selected output folder: " + options.dstPath.string());
@@ -66,7 +43,8 @@ int main(int argc, char* argv[]) {
 
     Timer t;
 
-    vector<Image> images = collectImages(options);
+    vector<Image> images;
+    collectImages(images, options);
     if(images.size() == 0) {
         warn("There isn't any image in source folder");
         warn("Exiting program");
@@ -75,15 +53,14 @@ int main(int argc, char* argv[]) {
     string count = std::to_string(images.size());
     
     log("Found " + count + " images in " + std::to_string(t.ms()) + " ms");
-    log("Trying load " + count + " images...");
-    t.reset();
-    unsigned int loaded = loadImages(images, maxThreads);
-    log("Successfully loaded " + std::to_string(loaded) + " images in " + std::to_string(t.ms()) + " ms");
     log("Starting process loaded images...");
     t.reset();
-    unsigned int processed = ip.processAll(images);
-    log("Successfully processed " + std::to_string(processed) + " images in " + std::to_string(t.ms()) + " ms");
+    ProcessingResult res;
+    ip.processAll(images, res);
+    log("Successfully processed " + std::to_string(res.oks()) + " images in " + std::to_string(t.ms()) + " ms");
     t.reset();
+
+    report(res);
 
     return 0;
 }
@@ -91,6 +68,11 @@ int main(int argc, char* argv[]) {
 //
 
 bool readOptions(int argc, char* argv[], ProgramOptions& options) {
+    if (argc == 1) {
+        printUsage();
+        return false;
+    }
+
     for(int i = 1; i < argc; i++) {
         string arg = argv[i];
         if(arg == "--src" && (i+1) < argc) {
@@ -103,23 +85,25 @@ bool readOptions(int argc, char* argv[], ProgramOptions& options) {
                 threads = std::stoi(argv[++i]);
             } catch(const std::invalid_argument& e) {
                 err("Invalid --threads argument");
+                printUsage();
                 return false;
             }
             if(threads <= 0) {
                 err("Thread count must be > 0");
+                printUsage();
                 return false;
             }
             options.threads = std::make_optional(threads);
         } else {
             err("Unknown options format");
-            err("Usage: imgcut --src <src-folder> --dst <destination-folder>");
+            printUsage();
             return false;
         }
     }
 
     if (options.empty()) {
         err("Source and destination folders must be provided");
-        err("Usage: imgcut --src <src-folder> --dst <destination-folder>");
+        printUsage();
         return false;
     }
 
@@ -153,16 +137,12 @@ bool isValidOptions(const ProgramOptions& options) {
     return true;
 }
 
-vector<Image> collectImages(const ProgramOptions& options) {
-    vector<Image> images;
+void collectImages(vector<Image>& images, const ProgramOptions& options) {
 
     const vector<string> supported = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"};
 
     for(const auto& file : directory_iterator(options.srcPath)) {
         if(!file.is_regular_file()) continue;
-
-        path filename = file.path().filename();
-        path dst = options.dstPath / filename;
 
         string extension = file.path().extension().string();
         for (char& c : extension)
@@ -170,48 +150,44 @@ vector<Image> collectImages(const ProgramOptions& options) {
 
         // add to processing if file supported
         if(find(supported.begin(), supported.end(), extension) != supported.end()) {
-            images.emplace_back(file.path(), dst);
+            images.emplace_back(file.path());
         }
     }
-
-    return images;
 }
 
-std::mutex mtx;
-// multi-thread images load
-unsigned int loadImages(vector<Image>& images, unsigned int maxThreads) {
-    vector<thread> pool;
-    counting_semaphore sem(maxThreads);
-    atomic<unsigned int> loaded = 0;
+void printUsage() {
+    println("Usage:");
+    println("  imgcut --src <src-folder> --dst <destination-folder> [--threads N]");
+    println("");
+    println("Options:");
+    println("  --src       Source folder with input images");
+    println("  --dst       Destination folder where processed images are saved");
+    println("  --threads   Number of threads (optional, default: all CPU cores)");
+}
 
-    vector<Image*> failedImages;
-    
-    for(Image& img : images) {
-        sem.acquire();
+void report(const ProcessingResult& res) {
+    log("-------------------------------------------------------");
+    log("Processing summary: ");
+    log("\tLoad errors: " + std::to_string(res.loadErrs()));
+    log("\tSave errors: " + std::to_string(res.saveErrs()));
+    log("\tProcessing errors: " + std::to_string(res.procErrs()));
 
-        pool.emplace_back(thread(
-            [&img, &loaded, &sem, &failedImages](){
-                if(!img.load()) {
-                    std::lock_guard<std::mutex> guard = std::lock_guard(mtx);
-                    warn("Failed to load image: " + img.source().string() + ". Is image corrupted?");
-                    failedImages.push_back(&img);
-                } else {
-                    loaded.fetch_add(1, std::memory_order_relaxed);
+    if(!res.result.empty()) {
+        log("Detailed errors:");
+        for (const auto& ures : res.result) {
+            if (ures.status != ProcessingStatus::Ok) {
+                logg("\tFile: " + *ures.name + " - ");
+                switch (ures.status) {
+                    case ProcessingStatus::LoadErr: print("Load error. Maybe file corrupted."); break;
+                    case ProcessingStatus::SaveErr: print("Save error. Maybe you don't have permissions to save files to destination folder."); break;
+                    case ProcessingStatus::ProcessErr: print("Processing error:"); break;
+                    default: break;
                 }
-                sem.release();
+                if (ures.errtext.has_value()) {
+                    print(" (" + *ures.errtext + ")");
+                }
+                println("");
             }
-        ));
+        }
     }
-
-    for(thread& t : pool) {
-        if(t.joinable()) t.join();
-    }
-
-    for (Image* imgPtr : failedImages) {
-        images.erase(std::remove_if(images.begin(), images.end(),
-                                    [&](const Image& im){ return &im == imgPtr; }),
-                     images.end());
-    }
-
-    return loaded.load(std::memory_order_relaxed);
 }

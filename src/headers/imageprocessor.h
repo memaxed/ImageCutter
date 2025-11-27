@@ -1,4 +1,6 @@
 #include "image.h"
+#include "programoptions.h"
+#include "programstatus.h"
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -9,17 +11,17 @@ using std::atomic;
 
 class ImageProcessor {
     unsigned int maxThreads;
+    ProgramOptions& options;
 
 public:
-    ImageProcessor(unsigned int maxThreads) : maxThreads(maxThreads) {}
+    ImageProcessor(unsigned int maxThreads, ProgramOptions& options) : maxThreads(maxThreads), options(options) {}
 
-    unsigned int processAll(vector<Image>& imgs);
-    void processImage(Image& img);
+    void processAll(vector<Image>& imgs, ProcessingResult& res);
+    void processImage(Image& img, UnitProcessingResult& ures);
     
-    void cropSide(Image& img); 
+    void cropSide(cv::Mat& mat); 
     
-    void cropCenter(Image& img);
-    void expandImage(Image& img);
-
+    void cropCenter(cv::Mat& mat);
+    void expandImage(cv::Mat& mat);
 
 };

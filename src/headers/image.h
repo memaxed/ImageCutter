@@ -1,27 +1,10 @@
-#include <string>
 #include <filesystem>
-#include <opencv2/opencv.hpp>
-
-using namespace std::filesystem;
-using std::string;
 
 class Image {
-    path sourcePath;
-    path outputPath;
-
-    cv::Mat data;
-    bool loaded = false;
+    std::filesystem::path sourcePath;
 public:
-    Image(const path& source, const path& output) : sourcePath(source), outputPath(output) {};
+    Image(const std::filesystem::path& source) : sourcePath(source) {};
 
-    bool load();
-    bool save() const;
+    std::filesystem::path source() const {return sourcePath;}
 
-    path source() const {return sourcePath;}
-    path destination() const {return outputPath;}
-
-    cv::Mat& mat() { return data; }
-    const cv::Mat& mat() const { return data; }
-
-    bool isLoaded() const { return loaded; }
 };

@@ -1,10 +1,11 @@
-#include "../headers/imageprocessor.h"
+#include <opencv2/opencv.hpp>
 #include <semaphore>
+#include "../headers/imageprocessor.h"
+#include "../headers/loggers.h"
 
 using std::counting_semaphore;
 
-void ImageProcessor::cropSide(Image& img) {
-    cv::Mat& mat = img.mat();
+void ImageProcessor::cropSide(cv::Mat& mat) {
     const int targetSize = 512;
 
     int width = mat.cols;
@@ -24,9 +25,7 @@ void ImageProcessor::cropSide(Image& img) {
     }
 }
 
-void ImageProcessor::cropCenter(Image& img) {
-    cv::Mat& mat = img.mat();
-
+void ImageProcessor::cropCenter(cv::Mat& mat) {
     const int targetSize = 512;
     int width = mat.cols;
     int height = mat.rows;
@@ -41,15 +40,14 @@ void ImageProcessor::cropCenter(Image& img) {
     mat = mat(roi).clone(); 
 }
 
-void ImageProcessor::expandImage(Image& img) {
-    cv::Mat& mat = img.mat();
+void ImageProcessor::expandImage(cv::Mat& mat) {
     int targetSize = 512;
 
     // additions (in pixels) to target size
     int top = 0, bottom = 0, left = 0, right = 0;
 
     // if first side > 512 and second side < 512, cropping biggest side to 512
-    cropSide(img);
+    cropSide(mat);
 
     int width = mat.cols;
     int height = mat.rows;
@@ -74,41 +72,62 @@ void ImageProcessor::expandImage(Image& img) {
     }
 }
 
-void ImageProcessor::processImage(Image& img) {
+void ImageProcessor::processImage(Image& img, UnitProcessingResult& ures) {
 
-    cv::Mat& mat = img.mat();
-    int targetSize = 512;
+    string filename = img.source().filename().string();
 
-    int width = mat.cols;
-    int height = mat.rows;
+    // loading
+    cv::Mat mat = cv::imread(img.source().string(), cv::IMREAD_COLOR);
+    if(mat.empty()) {
+        ures.fill(filename, ProcessingStatus::LoadErr);
+        return;
+    }
 
-    bool biggerThanTarget = width >= targetSize && height >= targetSize;
+    // processing
+    try {
+        int targetSize = 512;
+
+        int width = mat.cols;
+        int height = mat.rows;
+
+        bool biggerThanTarget = width >= targetSize && height >= targetSize;
     
-    if (biggerThanTarget)
-        cropCenter(img);
-    else expandImage(img);
-    img.save();
+        if(biggerThanTarget)
+            cropCenter(mat);
+        else expandImage(mat);
+    } catch(std::exception& ex) {
+        ures.fillError(filename, ProcessingStatus::ProcessErr, ex.what());
+        return;
+    }
+     
+    // saving
+    path dst = options.dstPath / filename;
+    bool status = cv::imwrite(dst.string(), mat);
+    if(!status) {
+        ures.fill(filename, ProcessingStatus::SaveErr);
+        return;
+    }
+
+    ures.fill(filename, ProcessingStatus::Ok);
 }
 
-unsigned int ImageProcessor::processAll(vector<Image>& imgs) {
+void ImageProcessor::processAll(vector<Image>& imgs, ProcessingResult& res) {
     vector<thread> pool;
     counting_semaphore sem(maxThreads);
-    atomic<unsigned int> processed = 0;
 
     // for all images do multi-thread logic (using maximum threads)
     for(Image& img : imgs) {
         sem.acquire();
 
-        pool.emplace_back([&img, &sem, &processed, this]() mutable {
-            processImage(img); 
-            processed.fetch_add(1, std::memory_order_relaxed);
+        pool.emplace_back([&img, &sem, &res, this]() mutable {
+            UnitProcessingResult ures;
+            processImage(img, ures);
+            res.add(ures);
             sem.release();
         });
     }
 
     for(thread& t : pool)
         if(t.joinable()) t.join();
-
-    return processed.load(std::memory_order_relaxed);
 
 }
